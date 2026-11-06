@@ -11,6 +11,14 @@
 #       应用不存用户数据时写 DATA_NA=1（两项记 N/A）。
 # 装之前要准备（如先配出口代理）：写 before_install。
 
+# 本文件在两套环境里跑：dev.sh probes 导出 SMOKE_*（模板约定的名字），e2e 的 smoke.sh
+# 导出 E2E_*（同名含义的变量，另加 SMOKE_STATE）。这里统一成 SMOKE_*，探针函数只写一套。
+SMOKE_JAR="${SMOKE_JAR:-${E2E_JAR:-}}"
+SMOKE_OWNER="${SMOKE_OWNER:-${E2E_OWNER:-owner}}"
+SMOKE_INSTANCE="${SMOKE_INSTANCE:-${E2E_INSTANCE:-}}"
+SMOKE_SLUG="${SMOKE_SLUG:-${E2E_SLUG:-}}"
+SMOKE_WEB_URL="${SMOKE_WEB_URL:-${E2E_WEB_URL:-}}"
+
 # dweb / 落在 SFTPGo 自己的页面：还没有管理员时是 WebAdmin 初始化页（应用把客户端登录重定向过去），
 # 有管理员时是 WebClient 登录页（带 OpenID 入口）。两种都是应用真实页面。
 web_assert() { grep -q 'data-i18n="title.setup"\|web/client/oidclogin'; }
