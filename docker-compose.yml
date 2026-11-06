@@ -27,8 +27,8 @@ services:
       SFTPGO_HTTPD__BINDINGS__0__OIDC__USERNAME_FIELD: preferred_username
       SFTPGO_HTTPD__BINDINGS__0__OIDC__IMPLICIT_ROLES: "true"
       # pre-login hook 建号时给用户设的 SFTP 密码；用户可在 WebClient 里自己改，
-      # 插件详情里显示的连接信息也用它。
-      WONTON_SFTP_PASSWORD: ${WONTON_SECRET_CLIENT_PASSWORD}
+      # 插件详情里显示的连接信息也用它。SFTPGo 起 hook 不继承容器环境，密码经
+      # configs 写成文件给 hook 读（见 prelogin-hook.sh）。
     volumes:
       # 配置、数据库、用户主目录和备份都放在镜像的 /srv/sftpgo 下，整体持久化。
       - ${WONTON_APP_DATA}:/srv/sftpgo
@@ -41,6 +41,9 @@ services:
       - source: prelogin
         target: /etc/sftpgo/wonton-prelogin.sh
         mode: 0555
+      - source: sftp-password
+        target: /etc/sftpgo/wonton-sftp-password
+        mode: 0400
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
       interval: 30s
@@ -52,6 +55,8 @@ services:
 configs:
   prelogin:
     file: prelogin-hook.sh
+  sftp-password:
+    content: ${WONTON_SECRET_CLIENT_PASSWORD}
 
 x-wonton:
   spec: "0.5"

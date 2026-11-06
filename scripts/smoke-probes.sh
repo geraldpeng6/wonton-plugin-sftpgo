@@ -11,36 +11,43 @@
 #       应用不存用户数据时写 DATA_NA=1（两项记 N/A）。
 # 装之前要准备（如先配出口代理）：写 before_install。
 
-# dweb / 落在 WebClient 登录页；页面上有 OpenID 登录入口（/web/client/oidclogin）才说明 OIDC 接上了。
-web_assert() { grep -q 'web/client/oidclogin'; }
+# dweb / 落在 SFTPGo 自己的页面：还没有管理员时是 WebAdmin 初始化页（应用把客户端登录重定向过去），
+# 有管理员时是 WebClient 登录页（带 OpenID 入口）。两种都是应用真实页面。
+web_assert() { grep -q 'data-i18n="title.setup"\|web/client/oidclogin'; }
 
-identity_check() { # 走完整 OIDC 链落到 WebClient 文件页，页面回显登录用户名
-  local page
-  # /web/client/oidclogin → 核心身份提供方（核心会话自动放行）→ /web/oidc/redirect →
-  # pre-login hook 首次登录建号 → WebClient 文件页。
-  page="$(dweb /web/client/oidclogin -L)" || { echo "OIDC 链失败：$page"; return 1; }
-  grep -q 'file_manager_list' <<<"$page" ||
-    { echo "落点不是 WebClient 文件页：$(head -c 200 <<<"$page")"; return 1; }
-  grep -qF "$SMOKE_OWNER" <<<"$page" ||
-    { echo "文件页没回显用户 $SMOKE_OWNER：$(head -c 200 <<<"$page")"; return 1; }
-}
+# SMOKE_STATE 在 dev.sh probes 里是目录（.wonton），在 e2e 里是文件：标记存成跟它配套的路径。
+marker_file() { if [[ -d "$SMOKE_STATE" ]]; then printf '%s' "$SMOKE_STATE/sftpgo-data-marker"; else printf '%s' "${SMOKE_STATE}.sftpgo-marker"; fi; }
 
 csrf_from() { # <文件页 HTML>：页面内嵌的 X-CSRF-TOKEN
   sed -n "s/.*'X-CSRF-TOKEN': '\([^']*\)'.*/\1/p" <<<"$1" | head -1
 }
 
-client_session() { # 确保 $1（cookie jar）里有 WebClient 会话，输出文件页
+client_session() { # 确保 $1（cookie jar）里有 WebClient 会话，输出文件页；失败时输出落点说明
   local page
-  page="$(dweb /web/client/oidclogin -L -b "$1" -c "$1")" ||
+  page="$(dweb /web/client/oidclogin -L -b "$1" -c "$1" -w '\n%{http_code} %{url_effective}')" ||
     { echo "OIDC 链失败：$page"; return 1; }
-  grep -q 'file_manager_list' <<<"$page" || { echo "落点不是文件页：$(head -c 200 <<<"$page")"; return 1; }
-  printf '%s' "$page"
+  if grep -q 'file_manager_list' <<<"$page"; then
+    printf '%s' "$page"
+  else
+    echo "落点不是文件页（末行是状态码和最终 URL）：$(tail -1 <<<"$page")；页面开头：$(head -c 200 <<<"$page")"
+    return 1
+  fi
+}
+
+identity_check() { # 走完整 OIDC 链落到 WebClient 文件页，页面回显登录用户名
+  local page
+  # /web/client/oidclogin → 核心身份提供方（核心会话自动放行）→ /web/oidc/redirect →
+  # pre-login hook 首次登录建号 → WebClient 文件页。
+  page="$(client_session "$SMOKE_JAR")" || { echo "$page"; return 1; }
+  grep -qF "$SMOKE_OWNER" <<<"$page" ||
+    { echo "文件页没回显用户 $SMOKE_OWNER：$(head -c 200 <<<"$page")"; return 1; }
 }
 
 data_write() { # 用 WebClient 的上传接口在用户主目录写一个带随机标记的文件
-  local marker page csrf
+  local marker page csrf mf
+  mf="$(marker_file)"
   marker="$(head -c12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-  printf '%s' "$marker" >"$SMOKE_STATE/sftpgo-data-marker"
+  printf '%s' "$marker" >"$mf"
   page="$(client_session "$SMOKE_JAR")" || { echo "$page"; return 1; }
   csrf="$(csrf_from "$page")"
   [[ -n "$csrf" ]] || { echo "文件页里没有 CSRF token"; return 1; }
@@ -51,9 +58,10 @@ data_write() { # 用 WebClient 的上传接口在用户主目录写一个带随�
 }
 
 data_check() { # 升级/重装后重新走 OIDC，读回文件内容核对标记
-  local marker page csrf got
-  marker="$(cat "$SMOKE_STATE/sftpgo-data-marker" 2>/dev/null)"
-  [[ -n "$marker" ]] || { echo "没有 data-write 留下的标记"; return 1; }
+  local marker page csrf got mf
+  mf="$(marker_file)"
+  marker="$(cat "$mf" 2>/dev/null)"
+  [[ -n "$marker" ]] || { echo "没有 data-write 留下的标记（$mf）"; return 1; }
   page="$(client_session "$SMOKE_JAR")" || { echo "$page"; return 1; }
   csrf="$(csrf_from "$page")"
   [[ -n "$csrf" ]] || { echo "文件页里没有 CSRF token"; return 1; }
