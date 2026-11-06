@@ -11,11 +11,11 @@
 #       应用不存用户数据时写 DATA_NA=1（两项记 N/A）。
 # 装之前要准备（如先配出口代理）：写 before_install。
 
-# 本文件在两套环境里跑（dev.sh probes 和 e2e 的 smoke.sh），数据钩子可用面是套件契约：
+# 本文件在两套环境里跑（dev.sh probes 和 e2e 的 smoke.sh）。钩子可用面是套件契约：
 # 变量 SMOKE_STATE、SMOKE_JAR、SMOKE_WEB_URL、SMOKE_OWNER、SMOKE_BASE、SMOKE_TOKEN、
-# SMOKE_INSTANCE，助手 web_get、dweb。应用容器日志名里的总线前缀由插件自己的 id 派生
-# （com.sftpgo.sftpgo → com-sftpgo-sftpgo），不依赖契约外的变量。
-app_logs() { docker logs "wonton-$SMOKE_INSTANCE--com-sftpgo-sftpgo--sftpgo" 2>&1; }
+# SMOKE_INSTANCE，助手 web_get、dweb。会话交给 dweb 自己管（e2e 在身份项前用 web_login
+# 预热持久 jar；dev.sh probes 的 dweb 自带 SMOKE_JAR），探针不手动传 cookie，也不假设
+# SMOKE_* 在每个钩子里都已导出。应用容器名从 docker ps 自取（id 派生前缀 com-sftpgo-sftpgo）。
 
 # dweb / 落在 SFTPGo 自己的页面：还没有管理员时是 WebAdmin 初始化页（应用把客户端登录重定向过去），
 # 有管理员时是 WebClient 登录页（带 OpenID 入口）。两种都是应用真实页面。
@@ -28,9 +28,9 @@ csrf_from() { # <文件页 HTML>：页面内嵌的 X-CSRF-TOKEN
   sed -n "s/.*'X-CSRF-TOKEN': '\([^']*\)'.*/\1/p" <<<"$1" | head -1
 }
 
-client_session() { # 确保 SMOKE_JAR（主人会话 cookie）里有 WebClient 会话，输出文件页
+client_session() { # 走 dweb 的当前会话（e2e 已由 web_login 预热，dev.sh probes 的 dweb 自带 SMOKE_JAR），输出文件页
   local page
-  page="$(dweb /web/client/oidclogin -L -b "$SMOKE_JAR" -c "$SMOKE_JAR" -w '\n%{http_code} %{url_effective}')" ||
+  page="$(dweb /web/client/oidclogin -L -w '\n%{http_code} %{url_effective}')" ||
     { echo "OIDC 链失败：$page"; return 1; }
   if grep -q 'file_manager_list' <<<"$page"; then
     printf '%s' "$page"
@@ -45,7 +45,7 @@ identity_check() { # 走完整 OIDC 链落到 WebClient 文件页，页面回显
   page="$(client_session)" || {
     echo "$page"
     # 应用侧日志：hook 报错、令牌校验失败都在这里
-    app_logs | tail -25 || true
+    docker ps -aq --filter name=com-sftpgo-sftpgo | while read -r c; do docker logs "$c" 2>&1 | tail -25; done || true
     return 1
   }
   grep -qF "$SMOKE_OWNER" <<<"$page" ||
@@ -60,13 +60,13 @@ data_write() { # 用 WebClient 的上传接口在用户主目录写一个带随�
   page="$(client_session)" || { echo "$page"; return 1; }
   csrf="$(csrf_from "$page")"
   [[ -n "$csrf" ]] || { echo "文件页里没有 CSRF token"; return 1; }
-  body="$(dweb "/web/client/file?path=/wonton-smoke-$marker.txt" -b "$SMOKE_JAR" \
+  body="$(dweb "/web/client/file?path=/wonton-smoke-$marker.txt" \
     -H "X-CSRF-TOKEN: $csrf" -H 'Content-Type: application/octet-stream' \
     --data-binary "$marker" -w '\n%{http_code}' 2>&1)" || true
   code="$(tail -1 <<<"$body")"
   [[ "$code" == 2* ]] || {
     echo "上传失败（$code）：$(head -c 300 <<<"$body")"
-    app_logs | grep -i "csrf\|forbidden\|permission\|error" | tail -8 || true
+    docker ps -aq --filter name=com-sftpgo-sftpgo | while read -r c; do docker logs "$c" 2>&1 | grep -i "csrf\|forbidden\|permission\|error" | tail -8; done || true
     return 1
   }
 }
@@ -79,7 +79,7 @@ data_check() { # 升级/重装后重新走 OIDC，读回文件内容核对标记
   page="$(client_session)" || { echo "$page"; return 1; }
   csrf="$(csrf_from "$page")"
   [[ -n "$csrf" ]] || { echo "文件页里没有 CSRF token"; return 1; }
-  got="$(dweb "/web/client/file?path=/wonton-smoke-$marker.txt" -b "$SMOKE_JAR" \
+  got="$(dweb "/web/client/file?path=/wonton-smoke-$marker.txt" \
     -H "X-CSRF-TOKEN: $csrf")" || { echo "读不回文件：$got"; return 1; }
   [[ "$got" == "$marker" ]] || { echo "文件内容对不上：$(head -c 120 <<<"$got")"; return 1; }
 }
