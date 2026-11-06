@@ -47,17 +47,22 @@ identity_check() { # 走完整 OIDC 链落到 WebClient 文件页，页面回显
 }
 
 data_write() { # 用 WebClient 的上传接口在用户主目录写一个带随机标记的文件
-  local marker page csrf mf
+  local marker page csrf mf code body
   mf="$(marker_file)"
   marker="$(head -c12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   printf '%s' "$marker" >"$mf"
   page="$(client_session "$SMOKE_JAR")" || { echo "$page"; return 1; }
   csrf="$(csrf_from "$page")"
   [[ -n "$csrf" ]] || { echo "文件页里没有 CSRF token"; return 1; }
-  dweb "/web/client/file?path=/wonton-smoke-$marker.txt" -b "$SMOKE_JAR" \
+  body="$(dweb "/web/client/file?path=/wonton-smoke-$marker.txt" -b "$SMOKE_JAR" \
     -H "X-CSRF-TOKEN: $csrf" -H 'Content-Type: application/octet-stream' \
-    --data-binary "$marker" >/dev/null ||
-    { echo "上传失败"; return 1; }
+    --data-binary "$marker" -w '\n%{http_code}' 2>&1)" || true
+  code="$(tail -1 <<<"$body")"
+  [[ "$code" == 2* ]] || {
+    echo "上传失败（$code）：$(head -c 300 <<<"$body")"
+    docker logs "wonton-$SMOKE_INSTANCE--$SMOKE_SLUG--sftpgo" 2>&1 | grep -i "csrf\|forbidden\|permission\|error" | tail -8 || true
+    return 1
+  }
 }
 
 data_check() { # 升级/重装后重新走 OIDC，读回文件内容核对标记
