@@ -35,11 +35,22 @@ services:
       NO_PROXY: "*"
       no_proxy: "*"
     volumes:
-      # 配置、数据库和备份放在镜像的 /srv/sftpgo 下，整体持久化。共享文件夹挂进
-      # 主人账号的主目录（/srv/sftpgo/data/<用户名>，与 pre-login hook 建号路径一致）：
-      # Web 客户端和 SFTP 的根目录就是这几个共享文件夹，传进来的文件别的插件共用。
+      # 绑定挂载源不能嵌套（规范卷规则），所以 app-data 按子目录分开挂，互为兄弟目录：
+      # 核心对 app-data 下作为挂载源的目录统一预创建并交给服务的 user（PUID:PGID），
+      # 容器里由 Docker 顺手建的中间目录（比如 /srv/sftpgo/data 的脚手架）才是 root，
+      # 不能把可写路径放在它们下面。
+      # - 配置、数据库和备份在 /srv/sftpgo（app-data 的 config 子目录）。
+      # - 所有用户主目录的父目录在 /srv/sftpgo/data（app-data 的 users 子目录），
+      #   管理员在 WebAdmin 里建的用户也能由应用自己建家。
+      # - 主人家的根目录单独挂（app-data 的 owner-home 子目录）：pre-login hook 建号
+      #   用的就是 /srv/sftpgo/data/<用户名>，首登录即可写；host 上它是和 users 平级的
+      #   空目录，属主交给 PUID。
+      # - 共享文件夹挂进主人主目录的子目录（挂载目标是共享文件夹本身，PUID 属主）：
+      #   Web 客户端和 SFTP 的根目录就是这几个共享文件夹，传进来的文件别的插件共用。
       # 不走 SFTPGo 的虚拟文件夹：那要先建共享文件夹记录，动态建号时对不上。
-      - ${WONTON_APP_DATA}:/srv/sftpgo
+      - ${WONTON_APP_DATA}/config:/srv/sftpgo
+      - ${WONTON_APP_DATA}/users:/srv/sftpgo/data
+      - ${WONTON_APP_DATA}/owner-home:/srv/sftpgo/data/${WONTON_OWNER_NAME}
       - ${WONTON_SHARE_DOCUMENTS}:/srv/sftpgo/data/${WONTON_OWNER_NAME}/documents
       - ${WONTON_SHARE_DOWNLOADS}:/srv/sftpgo/data/${WONTON_OWNER_NAME}/downloads
       - ${WONTON_SHARE_TRANSFERS}:/srv/sftpgo/data/${WONTON_OWNER_NAME}/transfers
