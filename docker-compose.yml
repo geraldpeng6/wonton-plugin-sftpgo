@@ -3,7 +3,7 @@
 # 登录全走核心的 OIDC：打开网页就是 WebClient 的 OpenID 登录入口，由核心的身份提供方认证。
 # SFTPGo 的 OIDC 按绑定配置（v2.7 起），端点由它自己从发现文档取（config_url 写 issuer）。
 # implicit_roles 让角色由登录入口决定（WebClient 入口进用户，WebAdmin 入口进管理员），
-# 不依赖身份提供方的角色声明。OIDC 映射的账号必须已存在：用户的 WebClient 账号由上游的
+# 不依赖身份提供方的角色声明。OIDC 映射的账号必须已存在：主人的 WebClient 账号由上游的
 # pre-login hook 在首次登录时创建（见 prelogin-hook.sh），WebAdmin 没有对应的自动建号机制，
 # 需要的用户在 /web/admin 的初始化页自己建（用户名填云吞用户名即可走 OIDC 进管理员）。
 services:
@@ -29,14 +29,21 @@ services:
       # pre-login hook 建号时给用户设的 SFTP 密码；用户可在 WebClient 里自己改，
       # 插件详情里显示的连接信息也用它。SFTPGo 起 hook 不继承容器环境，密码经
       # configs 写成文件给 hook 读（见 prelogin-hook.sh）。
+      # 本插件只连核心的内部地址（OIDC 发现、令牌交换），不该走任何代理：宿主给
+      # 容器全局配过代理时（daemon 级 http_proxy），内部域名会被送去代理解析，实测
+      # 挡住过登出调用（dial tcp: lookup <实例域名>: server misbehaving）。
+      NO_PROXY: "*"
+      no_proxy: "*"
     volumes:
-      # 配置、数据库、用户主目录和备份都放在镜像的 /srv/sftpgo 下，整体持久化。
+      # 配置、数据库和备份放在镜像的 /srv/sftpgo 下，整体持久化。共享文件夹挂进
+      # 主人账号的主目录（/srv/sftpgo/data/<用户名>，与 pre-login hook 建号路径一致）：
+      # Web 客户端和 SFTP 的根目录就是这几个共享文件夹，传进来的文件别的插件共用。
+      # 不走 SFTPGo 的虚拟文件夹：那要先建共享文件夹记录，动态建号时对不上。
       - ${WONTON_APP_DATA}:/srv/sftpgo
-      # 共享文件夹：hook 把它们挂成每个用户的虚拟文件夹，Web 客户端和 SFTP 都能看到。
-      - ${WONTON_SHARE_DOCUMENTS}:/shares/documents
-      - ${WONTON_SHARE_DOWNLOADS}:/shares/downloads
-      - ${WONTON_SHARE_TRANSFERS}:/shares/transfers
-      - ${WONTON_SHARE_PHOTOS}:/shares/photos
+      - ${WONTON_SHARE_DOCUMENTS}:/srv/sftpgo/data/${WONTON_OWNER_NAME}/documents
+      - ${WONTON_SHARE_DOWNLOADS}:/srv/sftpgo/data/${WONTON_OWNER_NAME}/downloads
+      - ${WONTON_SHARE_TRANSFERS}:/srv/sftpgo/data/${WONTON_OWNER_NAME}/transfers
+      - ${WONTON_SHARE_PHOTOS}:/srv/sftpgo/data/${WONTON_OWNER_NAME}/photos
     configs:
       - source: prelogin
         target: /etc/sftpgo/wonton-prelogin.sh
@@ -113,6 +120,7 @@ x-wonton:
     client_password:
       generate: { bytes: 24 }
   permissions:
+    - owner.identity
     - network.lan
     - storage.share.documents:write
     - storage.share.downloads:write
