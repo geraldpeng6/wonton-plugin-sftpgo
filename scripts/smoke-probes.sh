@@ -29,16 +29,19 @@ client_session() { # 确保 $1（cookie jar）里有 WebClient 会话，输出�
   if grep -q 'file_manager_list' <<<"$page"; then
     printf '%s' "$page"
   else
-    echo "落点不是文件页（末行是状态码和最终 URL）：$(tail -1 <<<"$page")；页面开头：$(head -c 200 <<<"$page")"
+    echo "落点不是文件页（末行是状态码和最终 URL）：$(tail -1 <<<"$page")；页面开头：$(head -c 600 <<<"$page")"
     return 1
   fi
 }
 
 identity_check() { # 走完整 OIDC 链落到 WebClient 文件页，页面回显登录用户名
   local page
-  # /web/client/oidclogin → 核心身份提供方（核心会话自动放行）→ /web/oidc/redirect →
-  # pre-login hook 首次登录建号 → WebClient 文件页。
-  page="$(client_session "$SMOKE_JAR")" || { echo "$page"; return 1; }
+  page="$(client_session "$SMOKE_JAR")" || {
+    echo "$page"
+    # 应用侧日志：hook 报错、令牌校验失败都在这里
+    docker logs "wonton-$SMOKE_INSTANCE--$SMOKE_SLUG--sftpgo" 2>&1 | tail -25 || true
+    return 1
+  }
   grep -qF "$SMOKE_OWNER" <<<"$page" ||
     { echo "文件页没回显用户 $SMOKE_OWNER：$(head -c 200 <<<"$page")"; return 1; }
 }
