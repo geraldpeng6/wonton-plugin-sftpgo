@@ -77,7 +77,7 @@ configs:
     content: ${WONTON_SECRET_CLIENT_PASSWORD}
 
 x-wonton:
-  spec: "0.5"
+  spec: "0.6"
   id: com.sftpgo.sftpgo
   version: 0.1.0
   kind: app
