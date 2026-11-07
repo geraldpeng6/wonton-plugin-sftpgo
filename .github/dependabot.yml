@@ -1,7 +1,12 @@
 # 上游镜像发新版时开 PR，标签和摘要一起改；PR 跑插件自己的检查。
+# 大版本（v2→v3）可能变更 SQLite 数据目录的 schema，升级要人工核对上游迁移说明，
+# 不让 dependabot 自动开：忽略 major，minor/patch 照常。
 version: 2
 updates:
   - package-ecosystem: docker-compose
     directory: /
     schedule:
       interval: daily
+    ignore:
+      - dependency-name: "drakkan/sftpgo"
+        update-types: ["version-update:semver-major"]
