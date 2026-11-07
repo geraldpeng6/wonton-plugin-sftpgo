@@ -1,78 +1,143 @@
-# 示例插件：nginx 显示一个网页，向登录的人问好。改成自己的应用见 https://github.com/geraldpeng6/wonton-docs/blob/main/develop.md#写插件。
+# SFTPGo：SFTP、WebDAV 和 Web 文件客户端在同一个进程里，内置 SQLite，不额外起数据库。
+#
+# 登录全走核心的 OIDC：打开网页就是 WebClient 的 OpenID 登录入口，由核心的身份提供方认证。
+# SFTPGo 的 OIDC 按绑定配置（v2.7 起），端点由它自己从发现文档取（config_url 写 issuer）。
+# implicit_roles 让角色由登录入口决定（WebClient 入口进用户，WebAdmin 入口进管理员），
+# 不依赖身份提供方的角色声明。OIDC 映射的账号必须已存在：主人的 WebClient 账号由上游的
+# pre-login hook 在首次登录时创建（见 prelogin-hook.sh），WebAdmin 没有对应的自动建号机制，
+# 需要的用户在 /web/admin 的初始化页自己建（用户名填云吞用户名即可走 OIDC 进管理员）。
 services:
-  web:
-    # 镜像按摘要固定（多架构镜像写清单列表的摘要），标签只给人看。
-    image: nginx:1.31.7-alpine@sha256:892bb2152464f0c5d8972593a5f5afaf8054552580b699d95f8ff4af08c2d33d
+  sftpgo:
+    # 上游官方镜像。选 alpine 变体而不是默认的 debian：debian 变体里没有 wget/curl，
+    # 写不了健康检查；两个变体是同一套 CI 从同一份代码发的，alpine 版带 jq（hook 要用）。
+    # 镜像按摘要固定（多架构清单列表的摘要），标签只给人看。
+    image: drakkan/sftpgo:v2.7.6-alpine@sha256:484f430b2115ec8e015644b1a5e54a5f5b8568f883cb5146e9043885f691d8f7
+    # 镜像固定以 1000 运行，二进制能以任意 uid 跑；以用户身份运行，新建文件属主就是 PUID:PGID。
+    user: "${PUID}:${PGID}"
     environment:
-      # 网关代登录：SSI 回显的 Remote-User 只信核心带来的。官方镜像启动时对 templates 目录里的
-      # *.template 做 envsubst，把下面的地址换进 nginx 配置（见 web/default.conf.template）。
-      WONTON_CORE_ADDRESS: ${WONTON_CORE_ADDRESS}
-    # 包里的文件经 configs 交给容器（核心在启动前写进去），不能用卷挂载。
+      TZ: ${TZ}
+      # 数据库搬进数据目录：镜像默认把 SQLite 放在镜像内的 /var/lib/sftpgo，换 uid 跑时写不了。
+      SFTPGO_DATA_PROVIDER__NAME: /srv/sftpgo/sftpgo.db
+      SFTPGO_DATA_PROVIDER__PRE_LOGIN_HOOK: /etc/sftpgo/wonton-prelogin.sh
+      # OIDC：issuer、客户端、回调基址都用核心注入的值，不自己拼。
+      SFTPGO_HTTPD__BINDINGS__0__OIDC__CONFIG_URL: ${WONTON_OIDC_ISSUER}
+      SFTPGO_HTTPD__BINDINGS__0__OIDC__CLIENT_ID: ${WONTON_OIDC_CLIENT_ID}
+      SFTPGO_HTTPD__BINDINGS__0__OIDC__CLIENT_SECRET: ${WONTON_OIDC_CLIENT_SECRET}
+      SFTPGO_HTTPD__BINDINGS__0__OIDC__REDIRECT_BASE_URL: ${WONTON_APP_URL}
+      SFTPGO_HTTPD__BINDINGS__0__OIDC__USERNAME_FIELD: preferred_username
+      SFTPGO_HTTPD__BINDINGS__0__OIDC__IMPLICIT_ROLES: "true"
+      # pre-login hook 建号时给用户设的 SFTP 密码；用户可在 WebClient 里自己改，
+      # 插件详情里显示的连接信息也用它。SFTPGo 起 hook 不继承容器环境，密码经
+      # configs 写成文件给 hook 读（见 prelogin-hook.sh）。
+      # 本插件只连核心的内部地址（OIDC 发现、令牌交换），不该走任何代理：宿主给
+      # 容器全局配过代理时（daemon 级 http_proxy），内部域名会被送去代理解析，实测
+      # 挡住过登出调用（dial tcp: lookup <实例域名>: server misbehaving）。
+      NO_PROXY: "*"
+      no_proxy: "*"
+    volumes:
+      # 绑定挂载源不能嵌套（规范卷规则），所以 app-data 按子目录分开挂，互为兄弟目录：
+      # 核心对 app-data 下作为挂载源的目录统一预创建并交给服务的 user（PUID:PGID），
+      # 容器里由 Docker 顺手建的中间目录（比如 /srv/sftpgo/data 的脚手架）才是 root，
+      # 不能把可写路径放在它们下面。
+      # - 配置、数据库和备份在 /srv/sftpgo（app-data 的 config 子目录）。
+      # - 所有用户主目录的父目录在 /srv/sftpgo/data（app-data 的 users 子目录），
+      #   管理员在 WebAdmin 里建的用户也能由应用自己建家。
+      # - 主人家的根目录单独挂（app-data 的 owner-home 子目录）：pre-login hook 建号
+      #   用的就是 /srv/sftpgo/data/<用户名>，首登录即可写；host 上它是和 users 平级的
+      #   空目录，属主交给 PUID。
+      # - 共享文件夹挂进主人主目录的子目录（挂载目标是共享文件夹本身，PUID 属主）：
+      #   Web 客户端和 SFTP 的根目录就是这几个共享文件夹，传进来的文件别的插件共用。
+      # 不走 SFTPGo 的虚拟文件夹：那要先建共享文件夹记录，动态建号时对不上。
+      - ${WONTON_APP_DATA}/config:/srv/sftpgo
+      - ${WONTON_APP_DATA}/users:/srv/sftpgo/data
+      - ${WONTON_APP_DATA}/owner-home:/srv/sftpgo/data/${WONTON_OWNER_NAME}
+      - ${WONTON_SHARE_DOCUMENTS}:/srv/sftpgo/data/${WONTON_OWNER_NAME}/documents
+      - ${WONTON_SHARE_DOWNLOADS}:/srv/sftpgo/data/${WONTON_OWNER_NAME}/downloads
+      - ${WONTON_SHARE_TRANSFERS}:/srv/sftpgo/data/${WONTON_OWNER_NAME}/transfers
+      - ${WONTON_SHARE_PHOTOS}:/srv/sftpgo/data/${WONTON_OWNER_NAME}/photos
     configs:
-      - source: site
-        target: /etc/nginx/templates/default.conf.template
-      - source: page
-        target: /usr/share/nginx/html/index.html
-      - source: tokens
-        target: /usr/share/nginx/html/tokens.css
+      - source: prelogin
+        target: /etc/sftpgo/wonton-prelogin.sh
+        mode: 0555
+      - source: sftp-password
+        target: /etc/sftpgo/wonton-sftp-password
+        mode: 0400
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
       interval: 30s
       timeout: 5s
-      start_period: 30s
-      start_interval: 1s
+      retries: 3
+      start_period: 60s
+      start_interval: 2s
 
 configs:
-  site:
-    file: web/default.conf.template
-  page:
-    file: web/index.html
-  tokens:
-    file: web/tokens.css
+  prelogin:
+    file: prelogin-hook.sh
+  sftp-password:
+    content: ${WONTON_SECRET_CLIENT_PASSWORD}
 
 x-wonton:
-  spec: "0.5"
-  # 换成你自己的：反向域名形式，装上以后不能改。
-  id: app.example.hello
-  version: 0.1.1
+  spec: "0.6"
+  id: com.sftpgo.sftpgo
+  version: 0.1.0
   kind: app
-  title: { zh: 你好, en: Hello }
-  description: { zh: 向登录的人问好的示例网页, en: An example page that greets whoever is signed in }
-  icon: icon.svg
+  title: { zh: SFTPGo, en: SFTPGo }
+  description:
+    zh: 手机和电脑经 SFTP、WebDAV 直连家里的文件，网页里也能传
+    en: Reach your home files over SFTP and WebDAV, or right in the browser
+  icon: icon.png
   notices: [NOTICE]
-  screenshots: [screenshots/home.png]
-  author: { name: Example }
-  homepage: https://nginx.org
-  # 应用（这里是 nginx）的许可证；插件包自己的许可证写在仓库的 LICENSE 里。
-  license: BSD-2-Clause
+  author: { name: geraldpeng6, url: https://github.com/geraldpeng6 }
+  homepage: https://sftpgo.com
+  # 应用（SFTPGo）的许可证；插件包自己的许可证写在仓库的 LICENSE 里。
+  license: AGPL-3.0-only
   tags:
-    zh: [工具]
-    en: [Tools]
+    zh: [文件, 传输, 同步, SFTP]
+    en: [Files, Transfer, Sync, SFTP]
   about:
     zh: |
-      一个示例网页：登录以后，页面会向你问好。新建插件时可以照着改。
+      一台自己的文件传输服务器：手机、电脑用任意 SFTP 或 WebDAV 客户端直连，浏览器里也能上传下载和分享。
+
+      打开网页直接进文件客户端，用的是云吞的账号，不用再设密码。文档、下载、传输、照片这些共享文件夹都在里面，传进来的文件和别的插件共用。
+
+      想用 SFTP 客户端连：在插件详情里打开局域网开关，连接地址和账号就在旁边。改密码、双因子验证在网页右上角的个人资料里。
+
+      想管理服务器（建别的账号、加存储），打开 /web/admin：第一次会让你建管理员，用户名填你的云吞用户名，之后同样用云吞账号登进管理界面。
     en: |
-      An example page: once you are signed in, the page says hello. Copy it as a starting point for a new plugin.
-  release_notes: { zh: 名字和说明更新。, en: Product name and description update. }
+      Your own file transfer server: phones and computers connect over SFTP or WebDAV with any client, and the browser works too for uploads, downloads and shares.
+
+      Open the web UI and you are straight into the file client with your Wonton account — no second password. Your shared folders (documents, downloads, transfers, photos) are all there, so files you transfer are available to other plugins.
+
+      For SFTP clients, turn on the LAN switch in the plugin details; the address and account are right next to it. Change your SFTP password or set up two-factor authentication from your profile in the web client.
+
+      To administer the server (more accounts, more storage), open /web/admin: the first visit asks you to create an admin — use your Wonton username and future admin logins go through Wonton too.
+  release_notes: { zh: 第一个版本。, en: First release. }
   webui:
-    service: web
-    port: 80
-    # 示例页回显网关注入的用户名，见 https://github.com/geraldpeng6/wonton-docs/blob/main/plugin-spec.md#网关代登录sso-proxy。
-    sso: proxy
-    proxy:
-      headers:
-        Remote-User: "{user}"
-  # 能放到底栏的页面，见 https://github.com/geraldpeng6/wonton-docs/blob/main/plugin-spec.md#底栏页面tabs。放不放由用户决定。
-  tabs:
-    - id: home
-      title: { zh: 主页, en: Home }
-      icon: tabs/home.svg
-      icon_selected: tabs/home-fill.svg
-      path: /
-      # 这个页面没做适配，用默认的 inset：页面夹在 App 的栏中间，不会被挡。
-      # 想让内容从栏下滚过，写 layout: edge-to-edge，并用 --wonton-inset-* 留出栏的位置。
-  permissions: []
-  # 上游 nginx 官方镜像，amd64 和 arm64 都有；上游没写最低内存，按本机空闲实测取整（实测约 24M，取 64M）。
+    service: sftpgo
+    port: 8080
+    # 直接进 WebClient 的 OpenID 登录入口，不先看到应用的登录页。
+    path: /web/client/oidclogin
+    sso: oidc
+    oidc:
+      redirect_paths: [/web/oidc/redirect]
+  lan:
+    ports:
+      - { service: sftpgo, port: 2022 }
+    client:
+      address: "sftp://{host}:2022"
+      username: "{user}"
+      password: "{secret:client_password}"
+  secrets:
+    client_password:
+      generate: { bytes: 24 }
+  permissions:
+    - owner.identity
+    - network.lan
+    - storage.share.documents:write
+    - storage.share.downloads:write
+    - storage.share.transfers:write
+    - storage.share.photos:write
+  # 上游没写最低内存，本机空闲实测约 40M，取 128M。镜像有 amd64、arm64、arm/v7、ppc64le。
   requirements:
     arch: [amd64, arm64]
-    memory: 64M
+    memory: 128M

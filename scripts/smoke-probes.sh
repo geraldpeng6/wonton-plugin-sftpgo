@@ -6,12 +6,79 @@
 #       并在 SMOKE_NOTE 里写原因。dweb / web_get 是带用户会话的请求助手，可继续走应用自己的登录链。
 # 工具：MCP_TOOL 写一个只读工具名（可带插件前缀），MCP_ARGS 是 JSON 参数；mcp_assert 从标准输入读调用结果。
 #       要断言多个工具时改成写 mcp_check；调用前要备数据时写 before_mcp。
+# 数据：合并前要验证“升级/重装不丢用户数据”时写 data_write 和 data_check（两个都写才跑）：data_write 用随机标记写
+#       一条数据并把标记原样存进 $SMOKE_STATE，data_check 读回标记去应用里找，对不上就打印看到了什么并返回非 0。
+#       应用不存用户数据时写 DATA_NA=1（两项记 N/A）。
 # 装之前要准备（如先配出口代理）：写 before_install。
 
-web_assert() { grep -q '你好'; }   # 示例页的标题
+# 本文件在两套环境里跑（dev.sh probes 和 e2e 的 smoke.sh）。钩子可用面是套件契约：
+# 变量 SMOKE_STATE、SMOKE_JAR、SMOKE_WEB_URL、SMOKE_OWNER、SMOKE_BASE、SMOKE_TOKEN、
+# SMOKE_INSTANCE，助手 web_get、dweb。会话交给 dweb 自己管（e2e 在身份项前用 web_login
+# 预热持久 jar；dev.sh probes 的 dweb 自带 SMOKE_JAR），探针不手动传 cookie，也不假设
+# SMOKE_* 在每个钩子里都已导出。应用容器名从 docker ps 自取（id 派生前缀 com-sftpgo-sftpgo）。
 
-identity_check() { # 页面回显的就是网关注入的用户名
+# dweb / 落在 SFTPGo 自己的页面：还没有管理员时是 WebAdmin 初始化页（应用把客户端登录重定向过去），
+# 有管理员时是 WebClient 登录页（带 OpenID 入口）。两种都是应用真实页面。
+web_assert() { grep -q 'data-i18n="title.setup"\|web/client/oidclogin'; }
+
+# SMOKE_STATE 在 dev.sh probes 里是目录（.wonton），在 e2e 里是文件：标记存成跟它配套的路径。
+marker_file() { if [[ -d "$SMOKE_STATE" ]]; then printf '%s' "$SMOKE_STATE/sftpgo-data-marker"; else printf '%s' "${SMOKE_STATE}.sftpgo-marker"; fi; }
+
+csrf_from() { # <文件页 HTML>：页面内嵌的 X-CSRF-TOKEN
+  sed -n "s/.*'X-CSRF-TOKEN': '\([^']*\)'.*/\1/p" <<<"$1" | head -1
+}
+
+client_session() { # 走 dweb 的当前会话（e2e 已由 web_login 预热，dev.sh probes 的 dweb 自带 SMOKE_JAR），输出文件页
   local page
-  page="$(dweb /)" || { echo "页面失败：$page"; return 1; }
-  grep -qF "你好，$SMOKE_OWNER" <<<"$page" || { echo "页面没回显用户 $SMOKE_OWNER：$(head -c 120 <<<"$page")"; return 1; }
+  page="$(dweb /web/client/oidclogin -L -w '\n%{http_code} %{url_effective}')" ||
+    { echo "OIDC 链失败：$page"; return 1; }
+  if grep -q 'file_manager_list' <<<"$page"; then
+    printf '%s' "$page"
+  else
+    echo "落点不是文件页（末行是状态码和最终 URL）：$(tail -1 <<<"$page")；页面开头：$(head -c 600 <<<"$page")"
+    return 1
+  fi
+}
+
+identity_check() { # 走完整 OIDC 链落到 WebClient 文件页；dweb 的会话就是主人的（web_login 预热），
+  # 到达文件页即 OIDC 映射和 pre-login 建号成立。不引用 SMOKE_OWNER：身份项路径契约变量未注入。
+  local page
+  page="$(client_session)" || {
+    echo "$page"
+    # 应用侧日志：hook 报错、令牌校验失败都在这里
+    docker ps -aq --filter name=com-sftpgo-sftpgo | while read -r c; do docker logs "$c" 2>&1 | tail -25; done || true
+    return 1
+  }
+}
+
+data_write() { # 用 WebClient 的上传接口在用户主目录写一个带随机标记的文件
+  local marker page csrf mf code body
+  mf="$(marker_file)"
+  marker="$(head -c12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  printf '%s' "$marker" >"$mf"
+  page="$(client_session)" || { echo "$page"; return 1; }
+  csrf="$(csrf_from "$page")"
+  [[ -n "$csrf" ]] || { echo "文件页里没有 CSRF token"; return 1; }
+  body="$(dweb "/web/client/file?path=/wonton-smoke-$marker.txt" \
+    -H "X-CSRF-TOKEN: $csrf" -H 'Content-Type: application/octet-stream' \
+    --data-binary "$marker" -w '\n%{http_code}' 2>&1)" || true
+  code="$(tail -1 <<<"$body")"
+  [[ "$code" == 2* ]] || {
+    echo "上传失败（$code）：$(head -c 300 <<<"$body")"
+    docker ps -aq --filter name=com-sftpgo-sftpgo | while read -r c; do docker logs "$c" 2>&1 | grep -i "csrf\|forbidden\|permission\|error" | tail -8; done || true
+    return 1
+  }
+}
+
+data_check() { # 升级/重装后重新走 OIDC，读回文件内容核对标记
+  local marker page csrf got mf
+  mf="$(marker_file)"
+  marker="$(cat "$mf" 2>/dev/null)"
+  [[ -n "$marker" ]] || { echo "没有 data-write 留下的标记（$mf）"; return 1; }
+  page="$(client_session)" || { echo "$page"; return 1; }
+  csrf="$(csrf_from "$page")"
+  [[ -n "$csrf" ]] || { echo "文件页里没有 CSRF token"; return 1; }
+  got="$(dweb "/web/client/file?path=/wonton-smoke-$marker.txt" \
+    -H "X-CSRF-TOKEN: $csrf")" || { echo "读不回文件：$got"; return 1; }
+  [[ "$got" == "$marker" ]] || { echo "文件内容对不上：$(head -c 120 <<<"$got")"; return 1; }
 }
