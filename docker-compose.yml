@@ -26,6 +26,10 @@ services:
       SFTPGO_HTTPD__BINDINGS__0__OIDC__REDIRECT_BASE_URL: ${WONTON_APP_URL}
       SFTPGO_HTTPD__BINDINGS__0__OIDC__USERNAME_FIELD: preferred_username
       SFTPGO_HTTPD__BINDINGS__0__OIDC__IMPLICIT_ROLES: "true"
+      # 把 email 声明经 custom_fields 递给 pre-login hook（SFTPGO_LOGIND_USER 的
+      # oidc_custom_fields）：核心给每个人的 email 声明就是其内部邮箱，hook 按它填
+      # 账号邮箱，主人和家人一样。
+      SFTPGO_HTTPD__BINDINGS__0__OIDC__CUSTOM_FIELDS: email
       # 发信（找回密码、密码过期提醒、事件邮件）用核心注入的内部 SMTP：不认证、不加密。
       # user/password 一律不设：SFTPGo 凭据非空就会在明文连接上尝试认证；port 必须给，
       # 上游默认 587，而 encryption 的默认值恰好是 0（不加密）。
@@ -33,8 +37,9 @@ services:
       SFTPGO_SMTP__PORT: ${WONTON_SMTP_PORT}
       SFTPGO_SMTP__FROM: ${WONTON_MAIL_FROM}
       # pre-login hook 建号时给用户设的 SFTP 密码；用户可在 WebClient 里自己改，
-      # 插件详情里显示的连接信息也用它。SFTPGo 起 hook 不继承容器环境，主人身份和
-      # 密码经 configs 写成文件给 hook 读（见 prelogin-hook.sh）。
+      # 插件详情里显示的连接信息也用它。SFTPGo 起 hook 不继承容器环境，密码经
+      # configs 写成文件给 hook 读（见 prelogin-hook.sh）；账号邮箱不需要文件，
+      # hook 从 OIDC 的 email 声明里拿。
       # 本插件只连核心的内部地址（OIDC 发现、令牌交换），不该走任何代理：宿主给
       # 容器全局配过代理时（daemon 级 http_proxy），内部域名会被送去代理解析，实测
       # 挡住过登出调用（dial tcp: lookup <实例域名>: server misbehaving）。
@@ -68,12 +73,6 @@ services:
       - source: sftp-password
         target: /etc/sftpgo/wonton-sftp-password
         mode: 0400
-      - source: owner-name
-        target: /etc/sftpgo/wonton-owner-name
-        mode: 0444
-      - source: owner-email
-        target: /etc/sftpgo/wonton-owner-email
-        mode: 0444
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
       interval: 30s
@@ -87,10 +86,6 @@ configs:
     file: prelogin-hook.sh
   sftp-password:
     content: ${WONTON_SECRET_CLIENT_PASSWORD}
-  owner-name:
-    content: ${WONTON_OWNER_NAME}
-  owner-email:
-    content: ${WONTON_OWNER_EMAIL}
 
 x-wonton:
   spec: "0.11"
@@ -128,8 +123,8 @@ x-wonton:
 
       To administer the server (more accounts, more storage), open /web/admin: the first visit asks you to create an admin — use your Wonton username and future admin logins go through Wonton too.
   release_notes:
-    zh: 应用发的信（找回密码、事件通知）改走云吞的内部邮箱，会出现在你的 Wonton 私聊里；发给外部地址的信发不出去。主人账号现在自带内部邮箱，找回密码可用。
-    en: Mails the app sends (password resets, event notices) now go through Wonton's internal mailbox and appear in your Wonton private chat; mail to external addresses cannot be sent. Your account now carries the internal mailbox address, so password reset works.
+    zh: 应用发的信（找回密码、事件通知）改走云吞的内部邮箱，会出现在你的 Wonton 私聊里；发给外部地址的信发不出去。账号登录时自动带上内部邮箱（按 OIDC 声明，主人和家人一样），找回密码可用。
+    en: Mails the app sends (password resets, event notices) now go through Wonton's internal mailbox and appear in your Wonton private chat; mail to external addresses cannot be sent. Accounts pick up their internal mailbox address at login (from the OIDC claim), so password reset works.
   webui:
     service: sftpgo
     port: 8080
