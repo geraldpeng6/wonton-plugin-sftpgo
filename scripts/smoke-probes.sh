@@ -82,3 +82,78 @@ data_check() { # 升级/重装后重新走 OIDC，读回文件内容核对标记
     -H "X-CSRF-TOKEN: $csrf")" || { echo "读不回文件：$got"; return 1; }
   [[ "$got" == "$marker" ]] || { echo "文件内容对不上：$(head -c 120 <<<"$got")"; return 1; }
 }
+
+# ---------- 邮件（notify）：用应用自己的 SMTP 配置真发信，核对核心投进私聊（extra_check 由 e2e 冒烟跑） ----------
+
+sftpgo_container() { # 应用容器按核心打的标签找（钩子契约里没有 slug）
+  docker ps --format '{{.Names}}' \
+    --filter label=wonton.plugin=com.sftpgo.sftpgo --filter label=wonton.service=sftpgo | head -1
+}
+
+core_container() { # 核心容器：和插件容器同一个 compose 项目（Mailpit 只在核心的私有网络里）
+  local project
+  project="$(docker inspect "$(sftpgo_container)" --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null)"
+  [[ -n "$project" ]] || { echo "读不到插件容器的 compose 项目"; return 1; }
+  docker ps --format '{{.Names}}' --filter "label=com.docker.compose.project=$project" |
+    grep -E -- '--core$' | head -1
+}
+
+mailpit_messages() { # 经核心的网络栈读 Mailpit 收件箱 API（SMTP 25/HTTP 8025 都不发布到宿主）。
+  # API 要 Basic 认证（core:<密钥>，密钥在核心数据目录，核心的 mailbox 组件生成）。
+  local pwd
+  pwd="$(docker exec "$(core_container)" sh -c 'cat "$WONTON_DATA_DIR/core/mailpit/api-password"')" ||
+    { echo "读不到 Mailpit API 密钥"; return 1; }
+  docker run --rm --network "container:$(core_container)" curlimages/curl:8.23.0 --noproxy '*' -s \
+    -u "core:$pwd" "http://mailpit.wonton.internal:8025/api/v1/messages?limit=50"
+}
+
+_ours_in_mailpit() { # <owner 邮箱>：SFTPGo 发的、还没被核心取走的信
+  mailpit_messages | jq -r --arg f "com.sftpgo.sftpgo@plugins.wonton.internal" --arg t "$1" '
+    [.messages[] | select((.From.Address == $f) and ([.To[].Address] | index($t)))] | length'
+}
+
+extra_check() { # 邮件专项：sftpgo smtptest 用应用配置真发一封（收件人主人的内部邮箱），核对核心
+  # 投进私聊后把信取走；再发外部地址，核对应用拿到 SMTP 阶段的 550 失败。
+  local container owner_email out i
+  container="$(sftpgo_container)"
+  [[ -n "$container" ]] || { echo "找不到 sftpgo 容器（wonton.instance 标签）"; return 1; }
+  [[ -n "${SMOKE_OWNER:-}" ]] || { echo "缺 SMOKE_OWNER" >&2; return 1; }
+  # 主人的内部邮箱：规范固定 <用户名>@wonton.internal（冒烟工具按形状拼；应用的账号邮箱由 pre-login
+  # hook 按 OIDC 声明填，就是这个地址）。
+  owner_email="$SMOKE_OWNER@wonton.internal"
+  out="$(docker exec "$container" printenv SFTPGO_SMTP__HOST SFTPGO_SMTP__PORT SFTPGO_SMTP__FROM)" ||
+    { echo "容器里没有 SFTPGO_SMTP_* 变量"; return 1; }
+  grep -qx 'smtp.wonton.internal' <<<"$out" || { echo "SMTP host 不对：$out"; return 1; }
+  grep -qx '25' <<<"$out" || { echo "SMTP port 不对：$out"; return 1; }
+  grep -qx 'com.sftpgo.sftpgo@plugins.wonton.internal' <<<"$out" || { echo "SMTP from 不对：$out"; return 1; }
+  echo "容器里 SMTP 三件套就位：$(head -c 120 <<<"$out" | tr '\n' ' ')"
+
+  # 内部收件人：smtptest 同步发信，返回时信已被 Mailpit 收下；等它出现，再等核心投进私聊后删掉
+  # （投递成功才删）。smtptest 用应用配置发真实信件，不认证不加密的链路整个走到。
+  out="$(docker exec "$container" sftpgo smtptest --recipient "$owner_email" 2>&1)" ||
+    { echo "发给 $owner_email 失败：$out"; return 1; }
+  echo "smtptest 发送成功：$(head -c 200 <<<"$out" | tr '\n' ' ')"
+  local seen=0
+  for i in {1..12}; do
+    sleep 5
+    out="$(_ours_in_mailpit "$owner_email")" || { echo "$out"; return 1; }
+    if [[ "$out" != 0 ]]; then seen=1; break; fi
+  done
+  [[ "$seen" == 1 ]] || { echo "等了 1 分钟没看到信进 Mailpit（SMTP 链路没走通？）"; return 1; }
+  echo "信进了 Mailpit"
+  for i in {1..24}; do
+    sleep 5
+    out="$(_ours_in_mailpit "$owner_email")" || { echo "$out"; return 1; }
+    [[ "$out" == 0 ]] && break
+    [[ "$i" == 24 ]] && { echo "等了 2 分钟信还在 Mailpit，核心没取走（投递失败？）"; return 1; }
+  done
+  echo "信已被核心投进主人的 Wonton 私聊（Mailpit 里删了）"
+
+  # 外部收件人：核心在 SMTP 阶段 550 拒收，smtptest 要带着失败退出
+  if out="$(docker exec "$container" sftpgo smtptest --recipient wonton-smoke-external@example.com 2>&1)"; then
+    echo "发往外部地址竟然成功：$(head -c 200 <<<"$out")"
+    return 1
+  fi
+  grep -q '550' <<<"$out" || { echo "外部收件人的失败不是 550 拒收：$(head -c 300 <<<"$out")"; return 1; }
+  echo "外部地址被核心在 SMTP 阶段 550 拒收，应用拿到失败"
+}
