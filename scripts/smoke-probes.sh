@@ -112,9 +112,26 @@ _ours_in_mailpit() { # <owner 邮箱>：SFTPGo 发的、还没被核心取走的
     [.messages[] | select((.From.Address == $f) and ([.To[].Address] | index($t)))] | length'
 }
 
+wonton_chat_events() { # <条数>：核心投递事件的房间最近消息。核心实测亚秒取走信件（投完即删），
+  # 在 Mailpit 里几乎抓不到中间态，投进主人 Wonton 私聊的房间事件才是权威证据。
+  local mu room adm
+  mu="$(docker exec "$(core_container)" printenv WONTON_MATRIX_URL)"
+  room="$(docker exec "$(core_container)" sh -c 'cat "$WONTON_DATA_DIR/core/matrix-notice-room"')" ||
+    { echo "读不到通知房间 id"; return 1; }
+  adm="$(docker exec "$(core_container)" sh -c 'cat "$WONTON_DATA_DIR/core/matrix-admin-token"')" ||
+    { echo "读不到 Matrix 管理令牌"; return 1; }
+  docker run --rm --network "container:$(core_container)" curlimages/curl:8.23.0 --noproxy '*' -s \
+    -H "Authorization: Bearer $adm" "$mu/_matrix/client/v3/rooms/$room/messages?limit=$1&dir=b"
+}
+
+_delivered_after() { # <插件 id> <发送时刻毫秒>：发送之后投进主人 Wonton 私聊的新邮件事件数
+  wonton_chat_events 30 | jq -r --arg p "$1" --argjson ts "$2" '
+    [.chunk[] | select(.origin_server_ts > $ts and .content["app.wonton.plugin_mail"].plugin_id == $p)] | length'
+}
+
 extra_check() { # 邮件专项：sftpgo smtptest 用应用配置真发一封（收件人主人的内部邮箱），核对核心
   # 投进私聊后把信取走；再发外部地址，核对应用拿到 SMTP 阶段的 550 失败。
-  local container owner_email out i
+  local container owner_email out i sent_at
   container="$(sftpgo_container)"
   [[ -n "$container" ]] || { echo "找不到 sftpgo 容器（wonton.instance 标签）"; return 1; }
   [[ -n "${SMOKE_OWNER:-}" ]] || { echo "缺 SMOKE_OWNER" >&2; return 1; }
@@ -128,26 +145,25 @@ extra_check() { # 邮件专项：sftpgo smtptest 用应用配置真发一封（�
   grep -qx 'com.sftpgo.sftpgo@plugins.wonton.internal' <<<"$out" || { echo "SMTP from 不对：$out"; return 1; }
   echo "容器里 SMTP 三件套就位：$(head -c 120 <<<"$out" | tr '\n' ' ')"
 
-  # 内部收件人：smtptest 同步发信，返回时信已被 Mailpit 收下；等它出现，再等核心投进私聊后删掉
-  # （投递成功才删）。smtptest 用应用配置发真实信件，不认证不加密的链路整个走到。
+  # 内部收件人：smtptest 同步发信；核心亚秒取走，直接等主人私聊里的投递事件
+  sent_at="$(date +%s%3N)"
   out="$(docker exec "$container" sftpgo smtptest --recipient "$owner_email" 2>&1)" ||
     { echo "发给 $owner_email 失败：$out"; return 1; }
   echo "smtptest 发送成功：$(head -c 200 <<<"$out" | tr '\n' ' ')"
   local seen=0
   for i in {1..12}; do
     sleep 5
-    out="$(_ours_in_mailpit "$owner_email")" || { echo "$out"; return 1; }
+    out="$(_delivered_after com.sftpgo.sftpgo "$sent_at")" || { echo "$out"; return 1; }
     if [[ "$out" != 0 ]]; then seen=1; break; fi
   done
-  [[ "$seen" == 1 ]] || { echo "等了 1 分钟没看到信进 Mailpit（SMTP 链路没走通？）"; return 1; }
-  echo "信进了 Mailpit"
-  for i in {1..24}; do
+  [[ "$seen" == 1 ]] || { echo "等了 1 分钟没看到信投进主人的 Wonton 私聊（投递失败？）"; return 1; }
+  for i in {1..12}; do
     sleep 5
     out="$(_ours_in_mailpit "$owner_email")" || { echo "$out"; return 1; }
     [[ "$out" == 0 ]] && break
-    [[ "$i" == 24 ]] && { echo "等了 2 分钟信还在 Mailpit，核心没取走（投递失败？）"; return 1; }
+    [[ "$i" == 12 ]] && { echo "信投进了私聊，但 Mailpit 里还有滞留（核心没删？）"; return 1; }
   done
-  echo "信已被核心投进主人的 Wonton 私聊（Mailpit 里删了）"
+  echo "信已投进主人的 Wonton 私聊，Mailpit 没有滞留"
 
   # 外部收件人：核心在 SMTP 阶段 550 拒收，smtptest 要带着失败退出
   if out="$(docker exec "$container" sftpgo smtptest --recipient wonton-smoke-external@example.com 2>&1)"; then
