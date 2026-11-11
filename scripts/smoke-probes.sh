@@ -85,14 +85,31 @@ data_check() { # 升级/重装后重新走 OIDC，读回文件内容核对标记
 
 # ---------- 邮件（notify）：用应用自己的 SMTP 配置真发信，核对核心投进私聊（extra_check 由 e2e 冒烟跑） ----------
 
-sftpgo_container() { # 应用容器按核心打的标签找（钩子契约里没有 slug）
+sftpgo_container() { # 应用容器名按核心规则拼（wonton-<实例>--com-sftpgo-sftpgo--sftpgo），查不到再按标签兜底
+  local inst="${SMOKE_INSTANCE:-}"
+  if [[ -z "$inst" && -n "${SMOKE_BASE:-}" ]]; then
+    inst="${SMOKE_BASE#http://}"; inst="${inst%%.*}"
+  fi
+  if [[ -n "$inst" ]]; then
+    local name="wonton-${inst}--com-sftpgo-sftpgo--sftpgo"
+    docker inspect "$name" >/dev/null 2>&1 && { printf '%s\n' "$name"; return 0; }
+  fi
   docker ps --format '{{.Names}}' \
     --filter label=wonton.plugin=com.sftpgo.sftpgo --filter label=wonton.service=sftpgo | head -1
 }
 
-core_container() { # 核心容器：和插件容器同一个 compose 项目（Mailpit 只在核心的私有网络里）
+core_container() { # 核心容器：名字按核心规则拼（wonton-<实例>--core），兜底走 compose 项目标签
+  local inst="${SMOKE_INSTANCE:-}"
+  if [[ -z "$inst" && -n "${SMOKE_BASE:-}" ]]; then
+    inst="${SMOKE_BASE#http://}"; inst="${inst%%.*}"
+  fi
+  if [[ -n "$inst" ]]; then
+    local name="wonton-${inst}--core"
+    docker inspect "$name" >/dev/null 2>&1 && { printf '%s\n' "$name"; return 0; }
+  fi
   local project
-  project="$(docker inspect "$(sftpgo_container)" --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null)"
+  project="$(docker inspect "$(sftpgo_container)" --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null)" ||
+    { echo "读不到插件容器的 compose 项目"; return 1; }
   [[ -n "$project" ]] || { echo "读不到插件容器的 compose 项目"; return 1; }
   docker ps --format '{{.Names}}' --filter "label=com.docker.compose.project=$project" |
     grep -E -- '--core$' | head -1
