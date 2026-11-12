@@ -92,10 +92,10 @@ x-wonton:
   id: com.sftpgo.sftpgo
   version: 0.2.0
   kind: app
-  title: { zh: SFTPGo, en: SFTPGo }
+  title: { zh: 文件传输站（SFTPGo）, en: File Transfer Hub (SFTPGo) }
   description:
-    zh: 手机和电脑经 SFTP、WebDAV 直连家里的文件，网页里也能传
-    en: Reach your home files over SFTP and WebDAV, or right in the browser
+    zh: 给传文件用的中转站：在家里用电脑、手机上的传输软件（比如 FileZilla）直接连上来批量传文件，网页里也能上传下载和分享。适合常大批量倒文件、习惯用传输软件的人。
+    en: "A transfer station for your files: at home, connect a transfer app such as FileZilla from your computer or phone to move files in bulk, or upload, download and share in the browser. For big batches and people who already use a transfer app."
   icon: icon.png
   notices: [NOTICE]
   author: { name: geraldpeng6, url: https://github.com/geraldpeng6 }
@@ -107,7 +107,7 @@ x-wonton:
     en: [Files, Transfer, Sync, SFTP]
   about:
     zh: |
-      一台自己的文件传输服务器：手机、电脑用任意 SFTP 或 WebDAV 客户端直连，浏览器里也能上传下载和分享。
+      一台自己的文件传输站：手机、电脑用顺手的传输软件（FileZilla 这类）直连家里的文件，浏览器里也能上传下载和分享。
 
       打开网页直接进文件客户端，用的是云吞的账号，不用再设密码。文档、下载、传输、照片这些共享文件夹都在里面，传进来的文件和别的插件共用。
 
@@ -115,7 +115,7 @@ x-wonton:
 
       想管理服务器（建别的账号、加存储），打开 /web/admin：第一次会让你建管理员，用户名填你的云吞用户名，之后同样用云吞账号登进管理界面。
     en: |
-      Your own file transfer server: phones and computers connect over SFTP or WebDAV with any client, and the browser works too for uploads, downloads and shares.
+      Your own file transfer station: connect from any phone or computer with a transfer app such as FileZilla, or work in the browser to upload, download and share.
 
       Open the web UI and you are straight into the file client with your Wonton account — no second password. Your shared folders (documents, downloads, transfers, photos) are all there, so files you transfer are available to other plugins.
 
